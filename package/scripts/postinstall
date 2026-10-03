@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+LOG=/var/tmp/canon2900-opencapt-install.log
+exec >> "$LOG" 2>&1
+echo "$(/bin/date -u) OpenCAPT postinstall"
+QUEUE=Canon_LBP2900_OpenCAPT
+BACKEND=/usr/libexec/cups/backend/canon2900usb
+PPD=/Library/Printers/PPDs/Contents/Resources/Canon-LBP2900-OpenCAPT.ppd
+DEVICE_URI=canon2900usb://Canon/LBP2900
+OLD_URI="$(/usr/bin/lpstat -v "$QUEUE" 2>/dev/null | /usr/bin/awk -F': ' 'NR == 1 {print $2}')"
+case "$OLD_URI" in
+    canon2900usb://Canon/LBP2900|canon2900usb://Canon/LBP2900\?*) DEVICE_URI="$OLD_URI" ;;
+esac
+
+/usr/sbin/chown root:wheel /usr/libexec/cups/filter/canon2900-rastertocapt "$BACKEND" "$PPD"
+/bin/chmod 0555 /usr/libexec/cups/filter/canon2900-rastertocapt "$BACKEND"
+/bin/chmod 0644 "$PPD"
+
+# Discovery preserves the attached printer's serial/location. Only the exact
+# LBP2900 model is reported by this package's dedicated USB backend.
+USB_URI="$($BACKEND 2>/dev/null | /usr/bin/awk \
+    '$1 == "direct" && $2 ~ /^canon2900usb:\/\/Canon\/LBP2900(\?|$)/ { print $2; exit }')"
+if [ -n "$USB_URI" ]; then
+    DEVICE_URI="$USB_URI"
+fi
+
+/usr/sbin/lpadmin -p "$QUEUE" -E -v "$DEVICE_URI" -P "$PPD" \
+    -D "Canon LBP2900" -o PageSize=A4 -o Resolution=600dpi \
+    -o printer-is-shared=false -o printer-error-policy=stop-printer
+/usr/sbin/cupsenable "$QUEUE"
+/usr/sbin/cupsaccept "$QUEUE"
+/usr/bin/lpstat -p "$QUEUE"
+/usr/bin/lpstat -v "$QUEUE"
+
+# Avoid restarting CUPS immediately after lpadmin: the queue may not have been
+# persisted yet. Do not change the default printer or any other queue/agent.
+echo "Installation completed. Print an A4 test page from $QUEUE."
+exit 0

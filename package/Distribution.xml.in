@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Canon LBP2900</title>
+    <organization>org.opencapt.lbp2900.macos</organization>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+    <welcome file="welcome.html"/>
+    <license file="license.txt"/>
+    <conclusion file="conclusion.html"/>
+    <choices-outline><line choice="driver"/></choices-outline>
+    <choice id="driver" visible="false"><pkg-ref id="org.opencapt.lbp2900.macos"/></choice>
+    <pkg-ref id="org.opencapt.lbp2900.macos" version="@VERSION@">OpenCAPT-component.pkg</pkg-ref>
+</installer-gui-script>

@@ -1,0 +1,118 @@
+name: Build captdriver
+
+on:
+  push:
+    paths:
+      - 'src/**'
+  pull_request:
+    paths:
+      - 'src/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build captdriver
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v6
+
+      - name: Declare short commit variable
+        id: vars
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Create cache directory
+        run: mkdir ~/cache
+
+      - id: cache
+        name: Initialize cache
+        uses: actions/cache@v5
+        with:
+          path: ~/cache
+          key: captdriver-${{ runner.os }}
+
+      - name: APT install
+        run: |
+          sudo sed -i 's~Types: ~Types: deb-src ~' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt update
+          sudo DEBIAN_FRONTEND=noninteractive apt install -y build-essential libcups2-dev cups groff ninja-build
+          sudo DEBIAN_FRONTEND=noninteractive apt build-dep -y cups
+
+      - if: steps.cache.outputs.cache-hit != 'true'
+        name: Build polyfill-glibc
+        run: |
+          git clone https://github.com/corsix/polyfill-glibc.git && cd polyfill-glibc && ninja
+          cp polyfill-glibc ~/cache/
+
+      - name: Build captdriver
+        run: |
+          autoreconf -vif
+          ./configure
+          make -j4
+          make ppd
+          mkdir bin_out
+          cp src/rastertocapt bin_out
+          cp -r ppd bin_out
+
+      - name: Patch for older glibc
+        run: |
+          ~/cache/polyfill-glibc --target-glibc=2.17 bin_out/rastertocapt
+
+      - name: Save build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: captdriver_x86_64_${{ steps.vars.outputs.sha_short }}
+          path: bin_out/
+
+  cupsusb:
+    runs-on: ubuntu-latest
+    name: Build CUPS USB packend with patch
+    steps:
+      - name: Create cache directory
+        run: mkdir ~/cache
+
+      - id: cache
+        name: Initialize cache
+        uses: actions/cache@v5
+        with:
+          path: ~/cache
+          key: cups-${{ runner.os }}
+
+      - name: APT install
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo sed -i 's~Types: ~Types: deb-src ~' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt update
+          sudo DEBIAN_FRONTEND=noninteractive apt install -y build-essential
+          sudo DEBIAN_FRONTEND=noninteractive apt build-dep -y cups
+
+      - if: steps.cache.outputs.cache-hit != 'true'
+        name: Build polyfill-glibc
+        run: |
+          git clone https://github.com/corsix/polyfill-glibc.git && cd polyfill-glibc && ninja
+          cp polyfill-glibc ~/cache/
+
+      - name: Build CUPS USB backend
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir cups && cd cups
+          apt source cups
+          cd cups-*
+          wget https://github.com/OpenPrinting/cups/commit/ca92bf7fcf18e6e055c63ff701934b5d74b5d80d.patch
+          patch -p1 -i ca92bf7fcf18e6e055c63ff701934b5d74b5d80d.patch
+          ./configure
+          make -j4
+          mkdir ~/cache/bin_out
+          cp backend/usb ~/cache/bin_out
+
+      - name: Patch for older glibc
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          ~/cache/polyfill-glibc --target-glibc=2.17 ~/cache/bin_out/usb
+
+      - name: Save build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cups_usb_backend_patched_x86_64
+          path: ~/cache/bin_out/

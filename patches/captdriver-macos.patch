@@ -1,0 +1,351 @@
+--- a/src/capt-status.c
++++ b/src/capt-status.c
+@@ -24,6 +24,7 @@
+ #include "capt-command.h"
+ 
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+ 
+@@ -135,24 +136,36 @@
+ 	return &status;
+ }
+ 
++void capt_poll_wait(unsigned *attempts, const char *phase)
++{
++	if ((*attempts)++ >= CAPT_MAX_POLLS) {
++		fprintf(stderr, "ERROR: CAPT: timed out waiting for %s; check printer and resume the queue\n", phase);
++		exit(1);
++	}
++	usleep(100000);
++}
++
+ void capt_wait_ready(void)
+ {
+ 	/* Fix 7: Poll GetBasicStatus; wait until CMD_BUSY (0x04) clears.
+ 	 * CAPT_FL_CMD_BUSY = _FL(0,2) = 0x04 = CMD_BUSY per protocol §2.4.
+ 	 * Before Phase 1 this was CAPT_FL_BUSY which mapped to ERROR_BIT (0x80)
+ 	 * and was therefore waiting for errors to clear, not command completion. */
++	unsigned attempts = 0;
+ 	while (FLAG(capt_get_status(), CAPT_FL_CMD_BUSY))
+-		usleep(100000);
++		capt_poll_wait(&attempts, "command readiness");
+ }
+ 
+ void capt_wait_xready(void)
+ {
++	unsigned attempts = 0;
+ 	while (FLAG(capt_get_xstatus(), CAPT_FL_CMD_BUSY))
+-		usleep(100000);
++		capt_poll_wait(&attempts, "extended command readiness");
+ }
+ 
+ void capt_wait_xready_only(void)
+ {
++	unsigned attempts = 0;
+        while (FLAG(capt_get_xstatus_only(), CAPT_FL_CMD_BUSY))
+-               usleep(100000);
++               capt_poll_wait(&attempts, "extended command readiness");
+ }
+--- a/src/capt-status.h
++++ b/src/capt-status.h
+@@ -35,6 +35,13 @@
+ 	uint8_t  aux;              /* GetExtendedStatus byte 9 (Aux) auxiliary engine status */
+ 	uint16_t xstat_eng;        /* GetExtendedStatus bytes 13-14 (Eng) engine error flags */
+ };
++
++/* Local macOS port: fail a stuck hardware handshake instead of treating an
++ * unconfirmed page as printed. Waiting for the user's paper/button is separate. */
++#ifndef CAPT_MAX_POLLS
++#define CAPT_MAX_POLLS 1200
++#endif
++void capt_poll_wait(unsigned *attempts, const char *phase);
+ 
+ #define _FL(s, b) ((s << 16) | (1 << b))
+ enum capt_flags
+--- a/src/generic-ops.c
++++ b/src/generic-ops.c
+@@ -90,6 +90,7 @@
+ 			 * Spec §4.3: optionally call GetExtendedStatus on byte1 change. */
+ 			{
+ 				uint8_t prev_byte1 = (uint8_t)(status->status[0] & 0xFF);
++				unsigned drain_attempts = 0;
+ 				do {
+ 					status = capt_get_status();
+ 					buflevel_slots = CAPT_BUFLEVEL_SLOTS(status->buf_level);
+@@ -103,6 +104,8 @@
+ 								capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
+ 						}
+ 					}
++					if (buflevel_slots == 0)
++						capt_poll_wait(&drain_attempts, "USB buffer space");
+ 				} while (buflevel_slots == 0);
+ 			}
+ 			chunks_since_poll = 0;
+@@ -166,6 +169,7 @@
+ 	 * In normal mode, BufLevel should already be >= 1. */
+ 	if (buflevel_slots == 0) {
+ 		uint8_t prev_byte1 = (uint8_t)(status->status[0] & 0xFF);
++		unsigned drain_attempts = 0;
+ 		do {
+ 			status = capt_get_status();
+ 			buflevel_slots = CAPT_BUFLEVEL_SLOTS(status->buf_level);
+@@ -178,6 +182,8 @@
+ 				if (FLAG(status, CAPT_FL_NEED_INPUT_STATUS))
+ 					capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
+ 			}
++			if (buflevel_slots == 0)
++				capt_poll_wait(&drain_attempts, "final USB buffer drain");
+ 		} while (buflevel_slots == 0);
+ 	}
+ 
+--- a/src/paper.c
++++ b/src/paper.c
+@@ -24,7 +24,8 @@
+ void page_set_dims(struct page_dims_s *dims, const struct cups_page_header2_s *header)
+ {
+ 	dims->media_type = header->cupsMediaType;
+-	strncpy(dims->media_size, header->MediaType, 64);
++	strncpy(dims->media_size, header->MediaType, sizeof(dims->media_size) - 1);
++	dims->media_size[sizeof(dims->media_size) - 1] = '\0';
+ 	dims->paper_width  = header->cupsPageSize[0] * header->HWResolution[0] / 72.0f;
+ 	dims->paper_height = header->cupsPageSize[1] * header->HWResolution[1] / 72.0f;
+ 	dims->toner_save = header->cupsInteger[0];
+--- a/src/prn_lbp2900.c
++++ b/src/prn_lbp2900.c
+@@ -515,10 +515,11 @@
+ 		lbp2900_wait_ready(state->ops);
+ 	}
+ 
++	unsigned ready_attempts = 0;
+ 	while (1) {
+ 		if (! FLAG(lbp2900_get_status(state->ops), CAPT_FL_CMD_BUSY))
+ 			break;
+-		usleep(100000);
++		capt_poll_wait(&ready_attempts, "page command readiness");
+ 	}
+ 
+ 	capt_multi_begin(CAPT_MULTI_COMMAND);
+@@ -546,6 +547,7 @@
+ 	const struct capt_status_s *status;
+ 
+ 	fprintf(stderr, "DEBUG: CAPT: out-of-paper recovery starting\n");
++	fprintf(stderr, "STATE: +media-empty\nINFO: Load paper and press the printer's button\n");
+ 
+ 	/* 1. GetInputStatus — triggered by Bas1 & NEED_INPUT_STATUS; byte3=0x80 confirms paper-out */
+ 	capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
+@@ -638,6 +640,7 @@
+ 	capt_get_xstatus_only();
+ 
+ 	fprintf(stderr, "DEBUG: CAPT: out-of-paper recovery complete, counters reset to 0\n");
++	fprintf(stderr, "STATE: -media-empty\n");
+ 	/* After recovery, page counters are reset to 0.
+ 	 * Caller must track pages_printed_before_error to know where to resume. */
+ }
+@@ -679,9 +682,10 @@
+ 		 * upload, skip the poll loop entirely (spec §3.3, §14 Rule 10). */
+ 		status = lbp2900_get_status(state->ops);
+ 		if (status->page_decoding != pipage) {
++			unsigned decode_attempts = 0;
+ 			/* Start not yet confirmed — poll until Start==pipage exact match (spec §3.3) */
+ 			do {
+-				usleep(100000);
++				capt_poll_wait(&decode_attempts, "page decoder");
+ 				status = lbp2900_get_status(state->ops);
+ 			} while (status->page_decoding != pipage);
+ 		}
+@@ -694,6 +698,7 @@
+ 	/* SetJobInfo2(flag=6) at job end is now sent once in lbp2900_job_epilogue,
+ 	 * not per-page here, per protocol §2.7 §3.1.1. */
+ 
++	unsigned page_attempts = 0;
+ 	while (1) {
+ 		status = lbp2900_get_status(state->ops);
+ 
+@@ -761,6 +766,8 @@
+ 				? "paper jam" : "door open";
+ 			fprintf(stderr, "ERROR: CAPT: fatal printer error: %s (Eng=0x%04x) — aborting\n",
+ 				reason, status->xstat_eng);
++			fprintf(stderr, "STATE: +%s\n",
++				(status->xstat_eng & CAPT_ENG_JAM) ? "media-jam" : "door-open");
+ 			uint8_t jbuf[2] = { LO(job), HI(job) };
+ 			capt_sendrecv(CAPT_RELEASE_UNIT, jbuf, 2, NULL, 0);
+ 			exit(1);
+@@ -769,11 +776,13 @@
+ 		/* Legacy no-paper flags from extended status */
+ 		if (FLAG(status, CAPT_FL_NOPAPER2) || FLAG(status, CAPT_FL_NOTREADY)) {
+ 			fprintf(stderr, "DEBUG: CAPT: no paper\n");
++			fprintf(stderr, "STATE: +media-empty\n");
+ 			if (FLAG(status, CAPT_FL_PRINTING) || FLAG(status, CAPT_FL_PROCESSING1))
+-				continue;
+-			return false;
+-		}
+-		usleep(100000);
++				capt_poll_wait(&page_attempts, "page acceptance");
++			else
++				return false;
++		}
++		capt_poll_wait(&page_attempts, "page acceptance");
+ 	}
+ }
+ 
+@@ -797,12 +806,13 @@
+ 	 * interleaved as the Windows driver does) until the bit is gone. */
+ 	{
+ 		const struct capt_status_s *s;
++		unsigned delivery_attempts = 0;
+ 		while (1) {
+ 			capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
+ 			s = capt_get_xstatus_only();
+ 			if (!(s->aux & CAPT_AUX_PAPER_DELIVERY))
+ 				break;
+-			usleep(100000);
++			capt_poll_wait(&delivery_attempts, "final paper delivery");
+ 		}
+ 	}
+ 	return;
+@@ -914,8 +924,9 @@
+ 		.gpio_blink = lbp2900_gpio_blink,
+ 		.gpio_blink_size = ARRAY_SIZE(lbp2900_gpio_blink)
+ 	},
+-	.get_status = capt_get_xstatus,
+-	.wait_ready = capt_wait_ready,
++	/* Always refresh extended page counters on the LBP2900. */
++	.get_status = capt_get_xstatus_only,
++	.wait_ready = capt_wait_xready_only,
+ };
+ register_printer("LBP2900", lbp2900_ops.ops, WORKS);
+ 
+--- a/src/rastertocapt.c
++++ b/src/rastertocapt.c
+@@ -25,7 +25,9 @@
+ #include <fcntl.h>
+ #include <signal.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
++#include <unistd.h>
+ 
+ #include <cups/raster.h>
+ 
+@@ -227,6 +229,18 @@
+ 		if (band->size == 0)
+ 			continue;
+ 
++		/* A noisy raster can compress to more than the printer's chunk
++		 * limit. Send that band through the existing streaming code rather
++		 * than copying past the end of the grouping buffer. */
++		if (band->size > chunk_max) {
++			if (group_size > 0)
++				state->ops->send_band(state, groupbuf, group_size);
++			state->ops->send_band(state, band->data, band->size);
++			p = groupbuf;
++			group_size = 0;
++			continue;
++		}
++
+ 		/* If adding this band would exceed chunk_max, send the current group first. */
+ 		if (group_size > 0 && group_size + band->size > chunk_max) {
+ 			state->ops->send_band(state, groupbuf, group_size);
+@@ -272,19 +286,28 @@
+ 	exit(1);
+ }
+ 
+-static void do_print(int fd)
++static bool valid_raster_header(const struct cups_page_header2_s *header)
++{
++	return header->cupsWidth > 0 && header->cupsWidth <= 10000 &&
++		header->cupsHeight > 0 && header->cupsHeight <= 10000 &&
++		header->HWResolution[0] == 600 && header->HWResolution[1] == 600 &&
++		header->cupsBitsPerPixel == 1 && header->cupsBitsPerColor == 1 &&
++		header->cupsColorSpace == CUPS_CSPACE_K &&
++		header->cupsColorOrder == CUPS_ORDER_CHUNKED &&
++		header->cupsBytesPerLine >= (header->cupsWidth + 7) / 8 &&
++		header->cupsBytesPerLine <= (header->cupsWidth + 7) / 8 + 16 &&
++		header->cupsRowCount > 0 && header->cupsRowCount <= 256;
++}
++
++static bool do_print(int fd)
+ {
+ 	bool in_job = false;
+-	ops = printer_detect();
+-
+-	if (ops->alloc_state)
+-		state = ops->alloc_state();
+-	else
+-		state = calloc(1, sizeof(struct printer_state_s));
+-	state->ops = ops;
+-	state->ipage = 0;
+ 
+ 	raster = cupsRasterOpen(fd, CUPS_RASTER_READ);
++	if (!raster) {
++		fprintf(stderr, "ERROR: CAPT: unable to open CUPS raster\n");
++		return false;
++	}
+ 
+ 	fprintf(stderr, "DEBUG: CAPT: rastertocapt is rendering\n");
+ 
+@@ -296,6 +319,23 @@
+ 
+ 			if (! cupsRasterReadHeader2(raster, &header))
+ 				break; /* no more pages */
++
++			if (!valid_raster_header(&header)) {
++				fprintf(stderr, "ERROR: CAPT: expected 600 dpi monochrome CUPS raster\n");
++				exit(1);
++			}
++
++			/* Reject empty/invalid input before opening the USB print path. */
++			if (!state) {
++				ops = printer_detect();
++				state = ops->alloc_state ? ops->alloc_state() :
++					calloc(1, sizeof(struct printer_state_s));
++				if (!state)
++					abort();
++				state->ops = ops;
++				state->ipage = 0;
++				fprintf(stderr, "STATE: -media-empty\nSTATE: -media-jam\nSTATE: -door-open\n");
++			}
+ 
+ 			cached_page = calloc(1, sizeof(struct cached_page_s));
+ 			if (! cached_page)
+@@ -352,6 +392,7 @@
+ 		}
+ 
+ 		page_printed = true;
++		fprintf(stderr, "PAGE: %u 1\n", state->ipage);
+ 
+ 		if (page_printed) {
+ 			while (cached_page->bands) {
+@@ -371,11 +412,14 @@
+ 		in_job = false;
+ 	}
+ 
+-	if (! state->ipage)
++	bool success = state && state->ipage > 0;
++	if (! success)
+ 		fprintf(stderr, "ERROR: CAPT: no pages in job\n");
+ 
+ 	cupsRasterClose(raster);
++	raster = NULL;
+ 	free_state();
++	return success;
+ }
+ 
+ 
+@@ -416,11 +460,11 @@
+ 	}
+ 
+ 	fprintf(stderr, "DEBUG: CAPT: rastertocapt started\n");
+-	do_print(fd);
++	bool success = do_print(fd);
+ 	fprintf(stderr, "DEBUG: CAPT: rastertocapt finished\n");
+ 
+ 	if (argc == 7)
+ 		close(fd);
+ 
+-	return 0;
+-}
++	return success ? 0 : 1;
++}

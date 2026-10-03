@@ -1,0 +1,30 @@
+--- a/backend/usb-darwin.c
++++ b/backend/usb-darwin.c
+@@ -1235,7 +1235,10 @@
+     else if ((*printerIntf)->GetLocationID(printerIntf, &intfLocation) == kIOReturnSuccess)
+       snprintf(optionsstr, sizeof(optionsstr), "?location=%x", (unsigned)intfLocation);
+ 
+-    httpAssembleURI(HTTP_URI_CODING_ALL, uristr, sizeof(uristr), "usb", NULL, makestr, 0, modelstr);
++    /* OpenCAPT: discover only LBP2900 using this dedicated backend. */
++    if (strcmp(makestr, "Canon") || strcmp(modelstr, "/LBP2900"))
++      goto list_device_done;
++    httpAssembleURI(HTTP_URI_CODING_ALL, uristr, sizeof(uristr), "canon2900usb", NULL, makestr, 0, modelstr);
+     strlcat(uristr, optionsstr, sizeof(uristr));
+ 
+     cupsBackendReport("direct", uristr, make_modelstr, make_modelstr, idstr,
+@@ -1521,10 +1524,11 @@
+   {
+     if ((*iodev)->QueryInterface(iodev, USB_INTERFACE_KIND, (LPVOID *) &interface) == noErr)
+     {
+-      *driverBundlePath = IORegistryEntryCreateCFProperty(g.printer_obj, kUSBClassDriverProperty, NULL, kNilOptions);
+-
+-      g.use_generic_class_driver = (*driverBundlePath == NULL || (CFStringCompare(*driverBundlePath, kUSBGenericTOPrinterClassDriver, 0x0) == kCFCompareEqualTo));
+-      kr = load_classdriver(*driverBundlePath, interface, &g.classdriver);
++      /* OpenCAPT communicates through Apple's native generic USB class.
++         Ignore vendor class drivers left by older Canon installations. */
++      *driverBundlePath = NULL;
++      g.use_generic_class_driver = true;
++      kr = load_classdriver(NULL, interface, &g.classdriver);
+ 
+       if (kr != kIOReturnSuccess)
+ 	(*interface)->Release(interface);
