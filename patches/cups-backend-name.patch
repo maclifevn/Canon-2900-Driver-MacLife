@@ -1,6 +1,27 @@
 --- a/backend/usb-darwin.c
 +++ b/backend/usb-darwin.c
-@@ -1235,7 +1235,10 @@
+@@ -1130,6 +1130,12 @@
+   iterator_reference_t reference = { callBack, userdata, true };
+ 
+   IONotificationPortRef addNotification = IONotificationPortCreate(kIOMainPortDefault);
++
++  if (!addNotification)
++  {
++    Iterating = 0;
++    return;
++  }
+ 
+   int printingClass = kUSBPrintingClass;
+   int printingSubclass = kUSBPrintingSubclass;
+@@ -1157,6 +1163,7 @@
+     }
+     IOObjectRelease(add_iterator);
+   }
++  IONotificationPortDestroy(addNotification);
+   Iterating = 0;
+ }
+ 
+@@ -1235,7 +1242,10 @@
      else if ((*printerIntf)->GetLocationID(printerIntf, &intfLocation) == kIOReturnSuccess)
        snprintf(optionsstr, sizeof(optionsstr), "?location=%x", (unsigned)intfLocation);
  
@@ -12,7 +33,7 @@
      strlcat(uristr, optionsstr, sizeof(uristr));
  
      cupsBackendReport("direct", uristr, make_modelstr, make_modelstr, idstr,
-@@ -1521,10 +1524,11 @@
+@@ -1521,10 +1531,11 @@
    {
      if ((*iodev)->QueryInterface(iodev, USB_INTERFACE_KIND, (LPVOID *) &interface) == noErr)
      {
@@ -28,3 +49,37 @@
  
        if (kr != kIOReturnSuccess)
  	(*interface)->Release(interface);
+@@ -2475,3 +2486,6 @@
+ 
+   *status  = CUPS_SC_STATUS_OK;
+ }
++
++#include "usb-session.c"
++#include "usb-session-darwin.c"
+--- a/backend/usb.c
++++ b/backend/usb.c
+@@ -160,6 +160,11 @@
+   * Check command-line...
+   */
+ 
++#if defined(__APPLE__) && !defined(HAVE_LIBUSB)
++  if (argc == 2 && !strcmp(argv[1], "--session-service"))
++    return session_serve();
++#endif
++
+   if (argc == 1)
+   {
+     list_devices();
+@@ -233,8 +238,12 @@
+   * Finally, send the print file...
+   */
+ 
++#if defined(__APPLE__) && !defined(HAVE_LIBUSB)
++  status = session_submit(SESSION_SOCKET, uri, print_fd, copies);
++#else
+   status = print_device(uri, hostname, resource, options, print_fd, copies,
+                         argc, argv);
++#endif
+ 
+  /*
+   * Close the input file and return...

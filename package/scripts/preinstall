@@ -24,6 +24,7 @@ if ! /usr/sbin/pkgutil --pkg-info "$PKG_ID" >/dev/null 2>&1; then
     for file in \
         /usr/libexec/cups/filter/canon2900-rastertocapt \
         /usr/libexec/cups/backend/canon2900usb \
+        /Library/LaunchDaemons/org.opencapt.lbp2900.usb.plist \
         /Library/Printers/PPDs/Contents/Resources/Canon-LBP2900-OpenCAPT.ppd; do
         if [ -e "$file" ] || [ -L "$file" ]; then
             echo "An unmanaged file already exists at $file; installation stopped." >&2

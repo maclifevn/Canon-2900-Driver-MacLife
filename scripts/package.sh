@@ -29,11 +29,12 @@ done
 /usr/bin/python3 "$PROJECT_DIR/scripts/source-archive.py"
 rm -rf "$STAGE"
 mkdir -p "$PAYLOAD/usr/libexec/cups/filter" "$PAYLOAD/usr/libexec/cups/backend" \
-    "$PAYLOAD/Library/Printers/PPDs/Contents/Resources" "$SUPPORT" \
+    "$PAYLOAD/Library/Printers/PPDs/Contents/Resources" "$PAYLOAD/Library/LaunchDaemons" "$SUPPORT" \
     "$RESOURCES" "$SCRIPT_DIR"
 cp -X "$ARTIFACTS/canon2900-rastertocapt" "$PAYLOAD/usr/libexec/cups/filter/"
 cp -X "$ARTIFACTS/canon2900usb" "$PAYLOAD/usr/libexec/cups/backend/"
 cp -X "$ARTIFACTS/Canon-LBP2900-OpenCAPT.ppd" "$PAYLOAD/Library/Printers/PPDs/Contents/Resources/"
+cp -X "$PROJECT_DIR/package/org.opencapt.lbp2900.usb.plist" "$PAYLOAD/Library/LaunchDaemons/"
 cp -X "$ARTIFACTS/BUILD-MANIFEST.json" "$SUPPORT/"
 cp -X "$SOURCE" "$SUPPORT/Corresponding-Source.tar.gz"
 cp -X "$PROJECT_DIR/LICENSE" "$SUPPORT/LICENSE-GPL-3.0.txt"
@@ -47,6 +48,7 @@ cp -X "$PROJECT_DIR/package/resources/"*.html "$RESOURCES/"
 cp -X "$PROJECT_DIR/LICENSE" "$RESOURCES/license.txt"
 chmod -R u+w "$PAYLOAD" "$RESOURCES" "$SCRIPT_DIR"
 chmod 0555 "$PAYLOAD/usr/libexec/cups/filter/canon2900-rastertocapt" "$PAYLOAD/usr/libexec/cups/backend/canon2900usb"
+chmod 0644 "$PAYLOAD/Library/LaunchDaemons/org.opencapt.lbp2900.usb.plist"
 chmod 0755 "$SUPPORT/uninstall.sh" "$SCRIPT_DIR/preinstall" "$SCRIPT_DIR/postinstall"
 sed "s/@VERSION@/$VERSION/g" "$PROJECT_DIR/package/Distribution.xml.in" > "$STAGE/Distribution.xml"
 

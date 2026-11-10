@@ -43,6 +43,7 @@ mkdir -p "$TASK_BUILD/cups"
 tar -xzf "$PROJECT_DIR/third_party/source/$CUPS_ARCHIVE" \
     -C "$TASK_BUILD/cups" --strip-components=1
 patch -s -d "$TASK_BUILD/cups" -p1 < "$PROJECT_DIR/patches/cups-backend-name.patch"
+cp "$PROJECT_DIR/backend/"*.c "$TASK_BUILD/cups/backend/"
 JOBS="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 4)"
 echo "Building the native Darwin USB backend..."
 if ! (

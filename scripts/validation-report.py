@@ -35,10 +35,11 @@ if (dist / "GATEKEEPER.txt").exists():
 results = root / "build/tests/RESULTS.json"
 if results.exists():
     tests = json.loads(results.read_text())
+    tested_filter = manifest.get("unsigned_binary_sha256", manifest["sha256"])["canon2900-rastertocapt"]
     if (tests["result"] == "passed" and
-        tests["filter_sha256"] == manifest["sha256"]["canon2900-rastertocapt"] and
+        tests["filter_sha256"] == tested_filter and
         tests["ppd_sha256"] == manifest["sha256"]["Canon-LBP2900-OpenCAPT.ppd"]):
-        lines.append("Automated tests passed for this filter and PPD (AddressSanitizer + UndefinedBehaviorSanitizer):")
+        lines.append("Automated tests passed for the corresponding build (AddressSanitizer + UndefinedBehaviorSanitizer):")
         lines.append((root / "build/tests/RESULTS.txt").read_text().strip())
     else:
         lines.append("Automated tests: no matching results for this build.")

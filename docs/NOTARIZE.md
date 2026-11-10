@@ -9,6 +9,8 @@ chmod +x scripts/notarize.sh
 ./scripts/notarize.sh
 ```
 
+Có thể đặt `OPENCAPT_DIST_DIR` thành đường dẫn tuyệt đối để lưu kết quả riêng theo từng phiên bản.
+
 Máy hiện dùng identity Application của team `CF5PGH3KGK` và profile `MNotch-notary`. Nếu dùng signing account khác, truyền tên đầy đủ bằng các biến sau:
 
 ```sh

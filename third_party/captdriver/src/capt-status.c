@@ -57,17 +57,11 @@ static void decode_status(const uint8_t *s, size_t size)
 {
 	status.status[0] = WORD(s[0], s[1]);
 
-	if (size <= 2)
-		return;
-
-	/* BufLevel low byte is at payload byte 5 (0-indexed: s[4]), byte 6 = s[5].
-	 * Parse it whenever we have at least 6 payload bytes (total size > 8). */
-	if (size > 8)
-		status.buf_level = s[4];  /* CAPT_BSTAT_BUF_LO / CAPT_XSTAT_BUF_LO */
-
-	status.status[1] = WORD(s[8], s[9]);
-
-	if (size <= 10)
+	if (size >= 6)
+		status.buf_level = s[CAPT_BSTAT_BUF_LO];
+	if (size >= 10)
+		status.status[1] = WORD(s[8], s[9]);
+	if (size < 22)
 		return;
 
 	status.aux            = s[CAPT_XSTAT_AUX];    /* byte 9:  Aux auxiliary engine status */
@@ -93,7 +87,7 @@ static void decode_status(const uint8_t *s, size_t size)
 
 static void download_status(uint16_t cmd)
 {
-	uint8_t buf[0x10000];
+	uint8_t buf[40] = {0};
 	size_t size = sizeof(buf);
 	capt_sendrecv(cmd, NULL, 0, buf, &size);
 	decode_status(buf, size);

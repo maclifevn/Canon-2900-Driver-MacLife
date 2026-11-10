@@ -46,10 +46,16 @@ with tarfile.open(support / "Corresponding-Source.tar.gz") as archive:
     members = archive.getmembers()
     assert all(m.isfile() and not m.name.startswith("/") and ".." not in pathlib.PurePosixPath(m.name).parts for m in members)
     names = [m.name for m in members]
-    for suffix in ["/LICENSE", "/scripts/build.sh", "/third_party/source/cups-4bd119b.tar.gz", "/third_party/captdriver/src/rastertocapt.c"]:
+    for suffix in ["/LICENSE", "/scripts/build.sh", "/third_party/source/cups-4bd119b.tar.gz",
+                   "/third_party/captdriver/src/rastertocapt.c", "/backend/usb-session-darwin.c"]:
         assert any(name.endswith(suffix) for name in names), suffix
 
 allowed_files = set(paths.values())
+service_name = "org.opencapt.lbp2900.usb.plist"
+service = root / "Library/LaunchDaemons" / service_name
+assert service.read_bytes() == (project / "package" / service_name).read_bytes()
+subprocess.run(["/usr/bin/plutil", "-lint", str(service)], check=True)
+allowed_files.add(str(service.relative_to(root)))
 allowed_files.update("Library/Application Support/Canon LBP2900 OpenCAPT/" + name for name in [
     "BUILD-MANIFEST.json", "Corresponding-Source.tar.gz", "LICENSE-GPL-3.0.txt", "CUPS-LICENSE.txt", "CUPS-NOTICE.txt",
     "README.md", "SOURCE.md", "THIRD_PARTY_NOTICES.md", "INSTALL.md", "uninstall.sh",

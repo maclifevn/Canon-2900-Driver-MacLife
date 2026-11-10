@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.opencapt.lbp2900.usb</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/libexec/cups/backend/canon2900usb</string>
+        <string>--session-service</string>
+    </array>
+    <key>UserName</key>
+    <string>_lp</string>
+    <key>Sockets</key>
+    <dict>
+        <key>CAPT</key>
+        <dict>
+            <key>SockPathName</key>
+            <string>/private/var/run/canon2900usb.sock</string>
+            <key>SockPathGroup</key>
+            <integer>26</integer>
+            <key>SockPathMode</key>
+            <integer>432</integer>
+        </dict>
+    </dict>
+</dict>
+</plist>

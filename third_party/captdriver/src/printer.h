@@ -37,6 +37,7 @@ struct printer_state_s {
 	unsigned iband;
 	unsigned isend;
 	bool sent_job_cont;        /* SetJobInfo2(flag=2) has been sent once */
+	double next_job_heartbeat;  /* monotonic deadline for the LBP2900 job */
 	uint16_t printer_blk;      /* max IC_VIDEO_DATA chunk size from GetPrinterInfo */
 	uint16_t printer_buf;      /* buffer count from GetPrinterInfo */
 	bool startprint_sent;      /* StartPrint was already sent in streaming mode */

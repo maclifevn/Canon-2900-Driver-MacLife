@@ -15,13 +15,15 @@
 
 Các sửa đổi cục bộ áp dụng vào nhánh ValdikSS, không thay thế nó bằng trình tự protocol của nhánh cũ.
 
+Phần giữ phiên USB và điều chỉnh `ReserveUnit`/`SetJobInfo2` cho LBP2900 tham khảo [ghi nhận thử nghiệm của Canon LBP2900 CAPT Toolkit trên Linux](https://github.com/brucenguyen1102/Canon-LBP2900-CAPT-Toolkit/tree/4b8c50cf/captd-persistent-daemon). Bản Mac dùng CUPS và IOKit để quản lý phiên USB.
+
 ## Backend USB
 
 - Source: https://github.com/OpenPrinting/cups
 - Commit: `4bd119bbec57885993ab583c79ee5c70be77a7c2`, tag `v2.4.17`.
 - Archive: `third_party/source/cups-4bd119b.tar.gz`; hash trong `sources.lock`.
 - Build target: `backend/usb`, Darwin/IOKit, ARM64, deployment target macOS 26.0.
-- Patch: `patches/cups-backend-name.patch` giới hạn discovery vào Canon LBP2900, dùng scheme `canon2900usb` và chọn USBGenericPrintingClass của Apple thay vì class driver của hãng còn sót trong IORegistry.
+- Patch: `patches/cups-backend-name.patch` giới hạn discovery vào Canon LBP2900, dùng scheme `canon2900usb` và chọn USBGenericPrintingClass của Apple. Source trong `backend/` cho phép tiến trình do launchd khởi chạy giữ kết nối IOKit và nhận các kênh CUPS của từng lệnh qua Unix socket cục bộ.
 - Libcups tạm chỉ dùng khi build/link backend và được cấu hình không cần TLS; bản libcups này không được đóng gói. Backend USB cuối dùng libcups của macOS.
 - Backend cuối liên kết `/usr/lib/libcups.2.dylib`, không kèm hoặc thay libcups hệ thống.
 - License: Apache-2.0 với ngoại lệ CUPS; giữ LICENSE, NOTICE và thông báo riêng trong các file source.

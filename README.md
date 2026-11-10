@@ -6,9 +6,11 @@ Gói dùng `ValdikSS/captdriver` và backend USB Darwin từ OpenPrinting CUPS. 
 
 ## Tải bộ cài
 
-[**Tải Canon-LBP2900-ML-0.1.2.pkg**](https://github.com/maclifevn/Canon-2900-Driver-MacLife/releases/download/v0.1.2/Canon-LBP2900-ML-0.1.2.pkg)
+[**Tải Canon-LBP2900-ML-0.1.3.pkg**](https://github.com/maclifevn/Canon-2900-Driver-MacLife/releases/download/v0.1.3/Canon-LBP2900-ML-0.1.3.pkg)
 
-Bản phát hành **v0.1.2** dành cho **Mac Apple Silicon chạy macOS 26 hoặc 27**, đã ký Developer ID, được Apple notarize (**Accepted**) và gắn ticket vào bộ cài. Kiểm tra Gatekeeper trả về **accepted / Notarized Developer ID**. Mở file `.pkg` và làm theo Installer; macOS sẽ hỏi quyền quản trị để cài driver.
+Bản phát hành **v0.1.3** dành cho **Mac Apple Silicon chạy macOS 26 hoặc 27**. Bộ cài đã ký Developer ID, được Apple notarize và gắn ticket. Mở file `.pkg` và làm theo Installer. macOS sẽ hỏi quyền quản trị để cài driver.
+
+Backend giữ phiên USB giữa các lệnh in và filter kiểm tra xác nhận giải phóng từng lệnh CAPT. Bản thử nghiệm này đã qua kiểm tra in liên tiếp với máy in mô phỏng trên macOS 27.0.1 và đang chờ xác nhận trên LBP2900 thật.
 
 Xem [hướng dẫn cài và gỡ](docs/INSTALL.md), [các bản phát hành](https://github.com/maclifevn/Canon-2900-Driver-MacLife/releases) và [cộng đồng MacLife và Đồng bọn](https://www.facebook.com/groups/maclife.vn). Release có source tương ứng và `SHA256SUMS` để đối chiếu file tải về.
 
@@ -20,9 +22,8 @@ Xem [hướng dẫn cài và gỡ](docs/INSTALL.md), [các bản phát hành](ht
 - Mặc định: A4, đen trắng, 600 dpi.
 - Người dùng xác nhận bản 0.1.0 in thành công ngày 03/10/2026. Bản 0.1.1 giữ nguyên hai binary driver, đổi lời giới thiệu và tên máy in thành **Canon LBP2900**.
 - Bản 0.1.2 thêm liên kết [cộng đồng MacLife và Đồng bọn](https://www.facebook.com/groups/maclife.vn) ở màn hình đầu installer; hai binary driver giữ nguyên.
-- Chưa xác nhận riêng bản 0.1.2 trên máy in thật hoặc hoàn tất kiểm thử cả macOS 26 và 27.
 - Chưa hỗ trợ/kiểm thử Intel, LBP2900+, print server hoặc nhiều LBP2900 cùng lúc.
-- Bản phát hành v0.1.2 trên GitHub đã ký Developer ID và notarize. Tự build bằng `make release` tạo bản ký ad-hoc với installer chưa notarize; xem [quy trình notarize](docs/NOTARIZE.md) nếu có chứng chỉ và tài khoản Apple Developer riêng.
+- Tự build bằng `make release` tạo binary ký ad-hoc và installer chưa notarize. Xem [quy trình notarize](docs/NOTARIZE.md) nếu có chứng chỉ và tài khoản Apple Developer riêng.
 
 Các báo cáo in được của dự án nguồn là cơ sở phát triển, không phải chứng nhận tương thích cho bản này.
 
@@ -30,7 +31,7 @@ Các báo cáo in được của dự án nguồn là cơ sở phát triển, kh
 
 Xem [docs/INSTALL.md](docs/INSTALL.md). Installer cần quyền quản trị; không cần Homebrew hay công cụ build trên máy nhận gói.
 
-Máy in được tạo: `Canon_LBP2900_OpenCAPT`, tên hiển thị **Canon LBP2900**. Cài đè bản 0.1.0 hoặc 0.1.1 sẽ cập nhật tên hiển thị của máy in hiện có.
+Hàng đợi `Canon_LBP2900_OpenCAPT` hiển thị là **Canon LBP2900**. Có thể cài đè v0.1.0 đến v0.1.2 sau khi các lệnh đang in hoàn tất.
 
 ## Build lại hoàn toàn từ source, không cần mạng
 
@@ -50,6 +51,7 @@ Gói và source tương ứng nằm trong `dist/`. Không chạy `make install`,
 |---|---|
 | Filter CAPT | `/usr/libexec/cups/filter/canon2900-rastertocapt` |
 | Backend USB riêng | `/usr/libexec/cups/backend/canon2900usb` |
+| Cấu hình dịch vụ phiên USB | `/Library/LaunchDaemons/org.opencapt.lbp2900.usb.plist` |
 | PPD | `/Library/Printers/PPDs/Contents/Resources/Canon-LBP2900-OpenCAPT.ppd` |
 | Hướng dẫn, giấy phép, source và công cụ gỡ | `/Library/Application Support/Canon LBP2900 OpenCAPT/` |
 | Log installer | `/var/tmp/canon2900-opencapt-install.log` |
@@ -64,6 +66,7 @@ Không có kernel extension hay yêu cầu tắt SIP/Gatekeeper toàn hệ thố
 - Input rỗng/sai raster trả lỗi; chỉ nhận raster đơn sắc 600 dpi của PPD.
 - Tránh tràn buffer khi một band nén lớn hơn chunk limit của máy in.
 - Backend riêng chỉ khám phá LBP2900, báo đúng scheme và dùng USB class của Apple để tránh phụ thuộc plugin Canon cũ.
+- Giữ phiên USB qua các lệnh in liên tiếp, ghép các đoạn phản hồi CAPT và bỏ dữ liệu cũ ở đầu lệnh mới.
 
 Nhánh upstream vẫn giữ trình tự xử lý giấy/nút bấm. Khi hết giấy, có thể cần nạp giấy và nhấn nút trên máy in; khả năng tiếp tục job còn cần thử trên phần cứng.
 

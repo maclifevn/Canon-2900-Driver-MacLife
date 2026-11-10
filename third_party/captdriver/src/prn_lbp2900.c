@@ -47,6 +47,7 @@ struct lbp2900_ops_s {
 
 	const struct capt_status_s * (*get_status) (void);
 	void (*wait_ready) (void);
+	bool linux_job_protocol;
 };
 
 static const uint8_t magicbuf_0[] = {
@@ -101,6 +102,12 @@ static void lbp2900_wait_ready(const struct printer_ops_s *ops)
 {
 	const struct lbp2900_ops_s *lops = container_of(ops, struct lbp2900_ops_s, ops);
 	lops->wait_ready();
+}
+
+static bool uses_linux_job_protocol(const struct printer_state_s *state)
+{
+	const struct lbp2900_ops_s *lops = container_of(state->ops, struct lbp2900_ops_s, ops);
+	return lops->linux_job_protocol;
 }
 
 /*
@@ -196,6 +203,19 @@ static void send_job_start(uint8_t fg)
 	capt_sendrecv(CAPT_SET_JOB_INFO2, buf, sizeof(buf), NULL, 0);
 }
 
+static size_t reserve_unit(struct printer_state_s *state, uint8_t buf[4])
+{
+	if (uses_linux_job_protocol(state)) {
+		/* Match the two consecutive status probes before ReserveUnit in the
+		 * Canon Linux driver's LBP2900 trace, including on a retry. */
+		capt_sendrecv(CAPT_GET_EXTENDED_STATUS, NULL, 0, NULL, 0);
+		capt_sendrecv(CAPT_GET_EXTENDED_STATUS, NULL, 0, NULL, 0);
+	}
+	size_t size = 4;
+	capt_sendrecv(CAPT_RESERVE_UNIT, magicbuf_0, ARRAY_SIZE(magicbuf_0), buf, &size);
+	return size;
+}
+
 /*
  * ReserveUnit with error recovery (all job prologues).
  *
@@ -206,10 +226,8 @@ static void send_job_start(uint8_t fg)
  */
 static uint16_t capt_reserve_unit(struct printer_state_s *state)
 {
-	uint8_t buf[8];
-	size_t size = sizeof(buf);
-
-	capt_sendrecv(CAPT_RESERVE_UNIT, magicbuf_0, ARRAY_SIZE(magicbuf_0), buf, &size);
+	uint8_t buf[4];
+	size_t size = reserve_unit(state, buf);
 
 	if (size >= 1 && (buf[0] & 0x80)) {
 		fprintf(stderr, "DEBUG: CAPT: ReserveUnit error flag 0x%02x — clearing and retrying\n",
@@ -233,8 +251,7 @@ static uint16_t capt_reserve_unit(struct printer_state_s *state)
 		lbp2900_wait_ready(state->ops);
 
 		/* Retry */
-		size = sizeof(buf);
-		capt_sendrecv(CAPT_RESERVE_UNIT, magicbuf_0, ARRAY_SIZE(magicbuf_0), buf, &size);
+		size = reserve_unit(state, buf);
 		if (size >= 1 && (buf[0] & 0x80)) {
 			fprintf(stderr, "ERROR: CAPT: ReserveUnit failed (0x%02x) after error recovery — aborting\n",
 				buf[0]);
@@ -242,7 +259,11 @@ static uint16_t capt_reserve_unit(struct printer_state_s *state)
 		}
 	}
 
-	return (size >= 4) ? WORD(buf[2], buf[3]) : 0;
+	if (size < sizeof(buf)) {
+		fprintf(stderr, "ERROR: CAPT: ReserveUnit reply did not contain a job ID\n");
+		exit(1);
+	}
+	return WORD(buf[2], buf[3]);
 }
 
 static void lbp2900_job_prologue(struct printer_state_s *state)
@@ -267,6 +288,7 @@ static void lbp3000_job_prologue(struct printer_state_s *state)
 	const struct capt_status_s *status;
 
 	state->sent_job_cont = false;
+	state->next_job_heartbeat = 0;
 	state->printer_page_offset = 0;
 
 	capt_get_printer_info(state);
@@ -384,6 +406,9 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 	 * Default 0x1f (density=7 in bits 5-2). If ink_k is set, shift it.
 	 * Fix: was ink_k, 0x1C, 0x1C, 0x1C (non-uniform); now all 4 bytes equal. */
 	uint8_t td = (dims->ink_k > 0) ? (uint8_t)(dims->ink_k << 2) : 0x1f;
+	bool linux_job = uses_linux_job_protocol(state);
+	uint8_t linux_mode = linux_job ? 0x01 : 0x00;
+	uint8_t other_td = linux_job ? td : 0x1c;
 
 	/* PaperType: special_mode_for_papertype() result per protocol §2.14.
 	 * Fix: was raw dims->media_type (wrong enum values); now converted correctly.
@@ -485,11 +510,11 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 	 */
 	uint8_t pageparms[] = {
 		/* idx  0- 7 */
-		0x00, 0x00, 0x30, 0x2A, sz, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x30, 0x2A, sz, linux_mode, 0x00, 0x00,
 		/* idx  8-15: TonerDensity, PaperType, ResFlag=0x11, Fixed_04, Fixed_00 */
-		td, 0x1C, 0x1C, 0x1C, paper_type, dims->media_adapt, 0x04, 0x00,
+	td, other_td, other_td, other_td, paper_type, dims->media_adapt, 0x04, 0x00,
 		/* idx 16-23: Fixed_01, Fixed_01b, SuperSmooth=0x02, TonerSave, Unk21=0x00, 0x00, MarginW LE */
-		0x01, 0x01, 0x02, save, 0x00, 0x00,
+	0x01, 0x01, 0x02, save, linux_mode, 0x00,
 		LO(dims->margin_width), HI(dims->margin_width),
 		/* idx 24-31: MarginH LE, LineSize LE, ImgHeight LE */
 		LO(dims->margin_height), HI(dims->margin_height),
@@ -645,6 +670,17 @@ static void lbp3000_oop_recovery(struct printer_state_s *state)
 	 * Caller must track pages_printed_before_error to know where to resume. */
 }
 
+static void send_job_heartbeat(struct printer_state_s *state)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	double seconds = now.tv_sec + now.tv_nsec / 1e9;
+	if (seconds >= state->next_job_heartbeat) {
+		send_job_start(CAPT_JOBFLAG_CONT);
+		state->next_job_heartbeat = seconds + 0.5;
+	}
+}
+
 static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct page_dims_s *dims)
 {
 	(void) dims;
@@ -695,16 +731,14 @@ static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct pa
 		capt_sendrecv(CAPT_START_PRINT, buf, 2, NULL, 0);
 	}
 
-	/* SetJobInfo2(flag=6) at job end is now sent once in lbp2900_job_epilogue,
-	 * not per-page here, per protocol §2.7 §3.1.1. */
-
+	bool linux_job = uses_linux_job_protocol(state);
 	unsigned page_attempts = 0;
 	while (1) {
 		status = lbp2900_get_status(state->ops);
 
-		/* SetJobInfo2(flag=2): send ONCE at first inter-page idle when Printed >= 1.
-		 * Spec §5, §11, §14 Rule 13: fire after StartPrint, during between-pages wait. */
-		if (!state->sent_job_cont && status->page_completed >= 1) {
+		if (linux_job) {
+			send_job_heartbeat(state);
+		} else if (!state->sent_job_cont && status->page_completed >= 1) {
 			send_job_start(CAPT_JOBFLAG_CONT);
 			state->sent_job_cont = true;
 		}
@@ -789,42 +823,31 @@ static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct pa
 static void lbp2900_job_epilogue(struct printer_state_s *state)
 {
 	uint8_t jbuf[2] = { LO(job), HI(job) };
+	bool linux_job = uses_linux_job_protocol(state);
 
-	/* SetJobInfo2(flag=3): send immediately after last page's IC_BLACK_END.
-	 * Spec §9, §11, §14 Rule 14: do NOT wait for Printed==totalPages first.
-	 * GetExtendedStatus first to confirm final state, then send flag=3. */
+	/* End and release the CAPT job while the USB session stays open. */
 	capt_get_xstatus_only();
-	send_job_start(CAPT_JOBFLAG_END);
+	if (linux_job)
+		send_job_heartbeat(state);
+	send_job_start(linux_job ? CAPT_JOBFLAG_END_LIN : CAPT_JOBFLAG_END);
 
-	capt_sendrecv(CAPT_RELEASE_UNIT, jbuf, 2, NULL, 0);
-
-	/* Wait for RCF_PAPER_DELIVERY (Aux byte 9 bit 0x04) to clear before
-	 * issuing the teardown sequence.  The last sheet is still being
-	 * physically delivered while this bit is set; sending ClearError /
-	 * DiscardData / GoOffline / ReleaseUnit before it clears aborts the
-	 * delivery prematurely.  Poll GetExtendedStatus (with GetInputStatus
-	 * interleaved as the Windows driver does) until the bit is gone. */
-	{
-		const struct capt_status_s *s;
-		unsigned delivery_attempts = 0;
-		while (1) {
-			capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
-			s = capt_get_xstatus_only();
-			if (!(s->aux & CAPT_AUX_PAPER_DELIVERY))
-				break;
-			capt_poll_wait(&delivery_attempts, "final paper delivery");
-		}
+	uint8_t release[2];
+	size_t size = sizeof(release);
+	capt_sendrecv(CAPT_RELEASE_UNIT, jbuf, sizeof(jbuf), release, &size);
+	if (linux_job && (size < sizeof(release) || release[0])) {
+		fprintf(stderr, "ERROR: CAPT: ReleaseUnit failed (status 0x%02x, %zu reply bytes)\n",
+			size ? release[0] : 0, size);
+		exit(1);
 	}
-	return;
 
-	/* Linux epilogue: ClearError → DiscardData → GetExtendedStatus
-	 * → GoOffline(JobID) → ReleaseUnit (protocol §3.1.1 Linux order) */
-	capt_get_xstatus_only();
-	capt_sendrecv(CAPT_CLEAR_ERROR, NULL, 0, NULL, 0);
-	capt_sendrecv(CAPT_DISCARD_DATA, NULL, 0, NULL, 0);
-	capt_get_xstatus_only();
-	capt_sendrecv(CAPT_GO_OFFLINE, jbuf, 2, NULL, 0);
-	capt_sendrecv(CAPT_RELEASE_UNIT, jbuf, 2, NULL, 0);
+	unsigned delivery_attempts = 0;
+	while (1) {
+		capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
+		const struct capt_status_s *s = capt_get_xstatus_only();
+		if (!(s->aux & CAPT_AUX_PAPER_DELIVERY))
+			break;
+		capt_poll_wait(&delivery_attempts, "final paper delivery");
+	}
 }
 
 static void lbp2900_page_setup(struct printer_state_s *state,
@@ -927,6 +950,7 @@ static struct lbp2900_ops_s lbp2900_ops = {
 	/* Always refresh extended page counters on the LBP2900. */
 	.get_status = capt_get_xstatus_only,
 	.wait_ready = capt_wait_xready_only,
+	.linux_job_protocol = true,
 };
 register_printer("LBP2900", lbp2900_ops.ops, WORKS);
 

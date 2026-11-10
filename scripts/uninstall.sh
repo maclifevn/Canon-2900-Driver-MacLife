@@ -3,6 +3,7 @@ set -eu
 
 PKG_ID=org.opencapt.lbp2900.macos
 QUEUE=Canon_LBP2900_OpenCAPT
+SERVICE=org.opencapt.lbp2900.usb
 if [ "$(/usr/bin/id -u)" -ne 0 ]; then
     echo "Run: sudo /bin/sh uninstall.sh" >&2
     exit 1
@@ -22,8 +23,12 @@ if /usr/bin/lpstat -p "$QUEUE" >/dev/null 2>&1; then
     /usr/sbin/lpadmin -x "$QUEUE"
 fi
 
+if /bin/launchctl print "system/$SERVICE" >/dev/null 2>&1; then
+    /bin/launchctl bootout "system/$SERVICE"
+fi
 /bin/rm -f /usr/libexec/cups/filter/canon2900-rastertocapt \
     /usr/libexec/cups/backend/canon2900usb \
+    "/Library/LaunchDaemons/$SERVICE.plist" \
     /Library/Printers/PPDs/Contents/Resources/Canon-LBP2900-OpenCAPT.ppd
 /bin/rm -rf "/Library/Application Support/Canon LBP2900 OpenCAPT"
 /usr/sbin/pkgutil --forget "$PKG_ID" >/dev/null

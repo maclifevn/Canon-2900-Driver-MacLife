@@ -13,7 +13,7 @@ destination = dist / ("Canon-LBP2900-OpenCAPT-" + version + "-source.tar.gz")
 prefix = "Canon-LBP2900-OpenCAPT-" + version
 entries = []
 for name in ["VERSION", "LICENSE", "Makefile", "README.md", "SOURCE.md", "sources.lock",
-             "THIRD_PARTY_NOTICES.md", "scripts", "package", "docs", "tests", "patches", "third_party"]:
+             "THIRD_PARTY_NOTICES.md", "scripts", "package", "docs", "tests", "backend", "patches", "third_party"]:
     path = root / name
     entries.extend([path] if path.is_file() else sorted(path.rglob("*")))
 

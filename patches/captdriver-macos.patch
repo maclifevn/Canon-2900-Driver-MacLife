@@ -1,3 +1,231 @@
+--- a/src/capt-command.c
++++ b/src/capt-command.c
+@@ -25,8 +25,11 @@
+ #include "std.h"
+ #include "word.h"
+ 
++#include <errno.h>
++#include <poll.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <time.h>
+ 
+ #include <unistd.h>
+ 
+@@ -36,6 +39,9 @@
+ static uint8_t capt_iobuf[0x10000];
+ static size_t  capt_iosize;
+ 
++/* CUPS connects the filter's backchannel on descriptor 3. */
++#define CAPT_BACKCHANNEL_FD 3
++
+ static void capt_debug_buf(const char *level, size_t size)
+ {
+ 	size_t i;
+@@ -64,61 +70,82 @@
+ 	while (iosize) {
+ 		cups_sc_status_t status;
+ 		uint8_t tmpbuf[128];
+-		size_t tmpsize = sizeof(tmpbuf);
++		int tmpsize = sizeof(tmpbuf);
+ 		size_t sendsize = iosize;
+ 		if (sendsize > 4096)
+ 			sendsize = 4096;
+ 
+-		fwrite(iopos, 1, sendsize, stdout);
++		if (fwrite(iopos, 1, sendsize, stdout) != sendsize || fflush(stdout)) {
++			fprintf(stderr, "ERROR: CAPT: USB backend closed the print stream\n");
++			exit(1);
++		}
+ 		iopos += sendsize;
+ 		iosize -= sendsize;
+-		fflush(stdout);
+ 
+ 		status = cupsSideChannelDoRequest(CUPS_SC_CMD_DRAIN_OUTPUT,
+-				(char *) tmpbuf, (int *) &tmpsize, 1.0);
++				(char *) tmpbuf, &tmpsize,
++#ifdef __APPLE__
++				10.0);
++#else
++				1.0);
++		if (status == CUPS_SC_STATUS_TIMEOUT) {
++			/* Older USB backends can miss a drain request on an empty pipe. */
++			fprintf(stderr, "DEBUG: CAPT: output already empty, not drained\n");
++			continue;
++		}
++#endif
+ 		if (status != CUPS_SC_STATUS_OK) {
+-			if (status == CUPS_SC_STATUS_TIMEOUT) {
+-				/* Overcome race conditions in usb backend */
+-				fprintf(stderr, "DEBUG: CAPT: output already empty, not drained\n");
+-			} else {
+-				fprintf(stderr, "ERROR: CAPT: no reply from backend, err=%i\n",
+-					(int) status);
+-				exit(1);
+-			}
++			fprintf(stderr, "ERROR: CAPT: no reply from backend, err=%i\n", (int) status);
++			exit(1);
+ 		}
+ 	}
+ }
+ 
+-static void capt_recv_buf(size_t offset, size_t expected)
++static double monotonic_seconds(void)
+ {
+-	ssize_t size;
+-	if (offset + expected > sizeof(capt_iobuf)) {
+-		fprintf(stderr, "ALERT: bug in CAPT driver, input buffer overflow\n");
+-		exit(1);
++	struct timespec now;
++	clock_gettime(CLOCK_MONOTONIC, &now);
++	return now.tv_sec + now.tv_nsec / 1e9;
++}
++
++static bool capt_read_to(size_t end, double deadline)
++{
++	while (capt_iosize < end) {
++		double remaining = deadline - monotonic_seconds();
++		if (remaining <= 0)
++			return false;
++		/* macOS libcups can block indefinitely on sub-second backchannel
++		 * timeouts. Poll the descriptor with the remaining deadline. */
++		struct pollfd backchannel = { CAPT_BACKCHANNEL_FD, POLLIN, 0 };
++		int ready = poll(&backchannel, 1, (int)(remaining * 1000) + 1);
++		if (ready < 0 && errno == EINTR)
++			continue;
++		if (ready <= 0)
++			return false;
++		ssize_t size = read(CAPT_BACKCHANNEL_FD, capt_iobuf + capt_iosize, end - capt_iosize);
++		if (size < 0 && (errno == EINTR || errno == EAGAIN))
++			continue;
++		if (size <= 0)
++			return false;
++		capt_iosize += (size_t)size;
+ 	}
+-	fprintf(stderr, "DEBUG: CAPT: waiting for %u bytes\n", (unsigned) expected);
+-	size = cupsBackChannelRead((char *) capt_iobuf + offset, expected, 15.0);
+-	if (size < 0) {
+-		fprintf(stderr, "ERROR: CAPT: no reply from printer\n");
+-		exit(1);
+-	}
+-	capt_iosize = offset + size;
++	return true;
+ }
+ 
+ const char *capt_identify(void)
+ {
+ 	while (1) {
+ 		cups_sc_status_t status;
+-		capt_iosize = sizeof(capt_iobuf) - 1;
++		int size = sizeof(capt_iobuf) - 1;
+ 		status = cupsSideChannelDoRequest(CUPS_SC_CMD_GET_DEVICE_ID,
+-				(char *) capt_iobuf, (int *) &capt_iosize, 60.0);
++				(char *) capt_iobuf, &size, 60.0);
+ 		if (status != CUPS_SC_STATUS_OK) {
+ 			fprintf(stderr, "ERROR: CAPT: unable to communicate with printer\n");
+ 			exit(1);
+ 		}
+-		capt_iobuf[capt_iosize] = '\0';
++		capt_iobuf[size] = '\0';
+ 		fprintf(stderr, "DEBUG: CAPT: printer ID string %s\n", capt_iobuf);
+-		if (capt_iosize)
++		if (size)
+ 			return (const char*) capt_iobuf;
+ 		usleep(50000);
+ 	}
+@@ -151,42 +178,60 @@
+ void capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size_t *reply_size)
+ {
+ 	capt_send(cmd, buf, size);
+-	capt_recv_buf(0, 6);
+-	if (capt_iosize != 6 || WORD(capt_iobuf[0], capt_iobuf[1]) != cmd) {
++	double deadline = monotonic_seconds() + 15.0;
++	capt_iosize = 0;
++	if (!capt_read_to(6, deadline))
++		goto incomplete;
++
++	/* The first command in a job can encounter a tail from the prior job.
++	 * Only search for a new header here, before sending any print data. */
++	unsigned discarded = 0;
++	while (cmd == CAPT_GET_PRINTER_INFO && discarded < 256 &&
++	       (WORD(capt_iobuf[0], capt_iobuf[1]) != cmd || WORD(capt_iobuf[2], capt_iobuf[3]) < 6)) {
++		memmove(capt_iobuf, capt_iobuf + 1, 5);
++		capt_iosize = 5;
++		if (!capt_read_to(6, deadline))
++			goto incomplete;
++		++discarded;
++	}
++	if (WORD(capt_iobuf[0], capt_iobuf[1]) != cmd || WORD(capt_iobuf[2], capt_iobuf[3]) < 6) {
+ 		fprintf(stderr, "ERROR: CAPT: bad reply from printer, "
+ 				"expected %02X %02X xx xx xx xx, got", LO(cmd), HI(cmd));
+ 		capt_debug_buf("ERROR", 6);
+ 		exit(1);
+ 	}
+-	while (1) {
+-		if (WORD(capt_iobuf[2], capt_iobuf[3]) == capt_iosize)
+-			break;
+-		if (BCD(capt_iobuf[2], capt_iobuf[3]) == capt_iosize)
+-			break;
+-		/* block at 64 byte boundary is not the last one */
+-		if (WORD(capt_iobuf[2], capt_iobuf[3]) > capt_iosize && capt_iosize % 64 == 6) {
+-			capt_recv_buf(capt_iosize, WORD(capt_iobuf[2], capt_iobuf[3]) - capt_iosize);
+-			continue;
+-		}
+-		/* we should never get here */
+-		fprintf(stderr, "ERROR: CAPT: bad reply from printer, "
+-				"expected size %02X %02X, got %02X %02X\n",
+-				capt_iobuf[2], capt_iobuf[3], LO(capt_iosize), HI(capt_iosize));
+-		capt_debug_buf("ERROR", capt_iosize);
+-		exit(1);
++	if (discarded)
++		fprintf(stderr, "DEBUG: CAPT: discarded %u stale USB reply bytes\n", discarded);
++
++	size_t binary = WORD(capt_iobuf[2], capt_iobuf[3]);
++	size_t bcd = BCD(capt_iobuf[2], capt_iobuf[3]);
++	if (bcd >= 6 && bcd < binary) {
++		/* Some firmware encodes the length in BCD. Look briefly for another
++		 * byte at that boundary before accepting the shorter reply. */
++		if (!capt_read_to(bcd, deadline))
++			goto incomplete;
++		double probe = monotonic_seconds() + 0.35;
++		if (!capt_read_to(bcd + 1, probe < deadline ? probe : deadline))
++			binary = bcd;
+ 	}
++	if (!capt_read_to(binary, deadline))
++		goto incomplete;
+ 	if (debug) {
+ 		fprintf(stderr, "DEBUG: CAPT: recv ");
+ 		capt_debug_buf("DEBUG", capt_iosize);
+ 	}
++	size_t payload_size = capt_iosize - 4;
+ 	if (reply) {
+-		size_t copysize = reply_size ? *reply_size : capt_iosize;
+-		if (copysize > capt_iosize)
+-			copysize = capt_iosize;
++		size_t copysize = reply_size && *reply_size < payload_size ? *reply_size : payload_size;
+ 		memcpy(reply, capt_iobuf + 4, copysize);
+ 	}
+ 	if (reply_size)
+-		*reply_size = capt_iosize;
++		*reply_size = payload_size;
++	return;
++
++incomplete:
++	fprintf(stderr, "ERROR: CAPT: incomplete reply for command 0x%04x (%zu bytes read)\n", cmd, capt_iosize);
++	exit(1);
+ }
+ 
+ void capt_multi_begin(uint16_t cmd)
+--- a/src/capt-command.h
++++ b/src/capt-command.h
+@@ -66,6 +66,7 @@
+ const char *capt_identify(void);
+ 
+ void capt_send(uint16_t cmd, const void *data, size_t size);
++/* reply_size is the output buffer capacity on entry and the payload length on return. */
+ void capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size_t *reply_size);
+ 
+ void capt_multi_begin(uint16_t cmd);
 --- a/src/capt-status.c
 +++ b/src/capt-status.c
 @@ -24,6 +24,7 @@
@@ -8,7 +236,41 @@
  #include <string.h>
  #include <unistd.h>
  
-@@ -135,24 +136,36 @@
+@@ -56,19 +57,13 @@
+ {
+ 	status.status[0] = WORD(s[0], s[1]);
+ 
+-	if (size <= 2)
++	if (size >= 6)
++		status.buf_level = s[CAPT_BSTAT_BUF_LO];
++	if (size >= 10)
++		status.status[1] = WORD(s[8], s[9]);
++	if (size < 22)
+ 		return;
+ 
+-	/* BufLevel low byte is at payload byte 5 (0-indexed: s[4]), byte 6 = s[5].
+-	 * Parse it whenever we have at least 6 payload bytes (total size > 8). */
+-	if (size > 8)
+-		status.buf_level = s[4];  /* CAPT_BSTAT_BUF_LO / CAPT_XSTAT_BUF_LO */
+-
+-	status.status[1] = WORD(s[8], s[9]);
+-
+-	if (size <= 10)
+-		return;
+-
+ 	status.aux            = s[CAPT_XSTAT_AUX];    /* byte 9:  Aux auxiliary engine status */
+ 	status.xstat_cnt      = s[CAPT_XSTAT_CNT];    /* byte 10: Cnt engine flags */
+ 	status.xstat_pap      = s[CAPT_XSTAT_PAP];    /* byte 11: Pap paper availability */
+@@ -92,7 +87,7 @@
+ 
+ static void download_status(uint16_t cmd)
+ {
+-	uint8_t buf[0x10000];
++	uint8_t buf[40] = {0};
+ 	size_t size = sizeof(buf);
+ 	capt_sendrecv(cmd, NULL, 0, buf, &size);
+ 	decode_status(buf, size);
+@@ -135,24 +130,36 @@
  	return &status;
  }
  
@@ -50,20 +312,20 @@
  }
 --- a/src/capt-status.h
 +++ b/src/capt-status.h
-@@ -35,6 +35,13 @@
- 	uint8_t  aux;              /* GetExtendedStatus byte 9 (Aux) auxiliary engine status */
+@@ -36,6 +36,13 @@
  	uint16_t xstat_eng;        /* GetExtendedStatus bytes 13-14 (Eng) engine error flags */
  };
-+
+ 
 +/* Local macOS port: fail a stuck hardware handshake instead of treating an
 + * unconfirmed page as printed. Waiting for the user's paper/button is separate. */
 +#ifndef CAPT_MAX_POLLS
 +#define CAPT_MAX_POLLS 1200
 +#endif
 +void capt_poll_wait(unsigned *attempts, const char *phase);
- 
++
  #define _FL(s, b) ((s << 16) | (1 << b))
  enum capt_flags
+ {
 --- a/src/generic-ops.c
 +++ b/src/generic-ops.c
 @@ -90,6 +90,7 @@
@@ -112,9 +374,130 @@
  	dims->paper_width  = header->cupsPageSize[0] * header->HWResolution[0] / 72.0f;
  	dims->paper_height = header->cupsPageSize[1] * header->HWResolution[1] / 72.0f;
  	dims->toner_save = header->cupsInteger[0];
+--- a/src/printer.h
++++ b/src/printer.h
+@@ -37,6 +37,7 @@
+ 	unsigned iband;
+ 	unsigned isend;
+ 	bool sent_job_cont;        /* SetJobInfo2(flag=2) has been sent once */
++	double next_job_heartbeat;  /* monotonic deadline for the LBP2900 job */
+ 	uint16_t printer_blk;      /* max IC_VIDEO_DATA chunk size from GetPrinterInfo */
+ 	uint16_t printer_buf;      /* buffer count from GetPrinterInfo */
+ 	bool startprint_sent;      /* StartPrint was already sent in streaming mode */
 --- a/src/prn_lbp2900.c
 +++ b/src/prn_lbp2900.c
-@@ -515,10 +515,11 @@
+@@ -47,6 +47,7 @@
+ 
+ 	const struct capt_status_s * (*get_status) (void);
+ 	void (*wait_ready) (void);
++	bool linux_job_protocol;
+ };
+ 
+ static const uint8_t magicbuf_0[] = {
+@@ -103,6 +104,12 @@
+ 	lops->wait_ready();
+ }
+ 
++static bool uses_linux_job_protocol(const struct printer_state_s *state)
++{
++	const struct lbp2900_ops_s *lops = container_of(state->ops, struct lbp2900_ops_s, ops);
++	return lops->linux_job_protocol;
++}
++
+ /*
+  * Parse GetPrinterInfo reply and store Blk/Buf in printer state.
+  * Per protocol §2.1 and §9 note 1:
+@@ -196,6 +203,19 @@
+ 	capt_sendrecv(CAPT_SET_JOB_INFO2, buf, sizeof(buf), NULL, 0);
+ }
+ 
++static size_t reserve_unit(struct printer_state_s *state, uint8_t buf[4])
++{
++	if (uses_linux_job_protocol(state)) {
++		/* Match the two consecutive status probes before ReserveUnit in the
++		 * Canon Linux driver's LBP2900 trace, including on a retry. */
++		capt_sendrecv(CAPT_GET_EXTENDED_STATUS, NULL, 0, NULL, 0);
++		capt_sendrecv(CAPT_GET_EXTENDED_STATUS, NULL, 0, NULL, 0);
++	}
++	size_t size = 4;
++	capt_sendrecv(CAPT_RESERVE_UNIT, magicbuf_0, ARRAY_SIZE(magicbuf_0), buf, &size);
++	return size;
++}
++
+ /*
+  * ReserveUnit with error recovery (all job prologues).
+  *
+@@ -206,11 +226,9 @@
+  */
+ static uint16_t capt_reserve_unit(struct printer_state_s *state)
+ {
+-	uint8_t buf[8];
+-	size_t size = sizeof(buf);
++	uint8_t buf[4];
++	size_t size = reserve_unit(state, buf);
+ 
+-	capt_sendrecv(CAPT_RESERVE_UNIT, magicbuf_0, ARRAY_SIZE(magicbuf_0), buf, &size);
+-
+ 	if (size >= 1 && (buf[0] & 0x80)) {
+ 		fprintf(stderr, "DEBUG: CAPT: ReserveUnit error flag 0x%02x — clearing and retrying\n",
+ 			buf[0]);
+@@ -233,8 +251,7 @@
+ 		lbp2900_wait_ready(state->ops);
+ 
+ 		/* Retry */
+-		size = sizeof(buf);
+-		capt_sendrecv(CAPT_RESERVE_UNIT, magicbuf_0, ARRAY_SIZE(magicbuf_0), buf, &size);
++		size = reserve_unit(state, buf);
+ 		if (size >= 1 && (buf[0] & 0x80)) {
+ 			fprintf(stderr, "ERROR: CAPT: ReserveUnit failed (0x%02x) after error recovery — aborting\n",
+ 				buf[0]);
+@@ -242,7 +259,11 @@
+ 		}
+ 	}
+ 
+-	return (size >= 4) ? WORD(buf[2], buf[3]) : 0;
++	if (size < sizeof(buf)) {
++		fprintf(stderr, "ERROR: CAPT: ReserveUnit reply did not contain a job ID\n");
++		exit(1);
++	}
++	return WORD(buf[2], buf[3]);
+ }
+ 
+ static void lbp2900_job_prologue(struct printer_state_s *state)
+@@ -267,6 +288,7 @@
+ 	const struct capt_status_s *status;
+ 
+ 	state->sent_job_cont = false;
++	state->next_job_heartbeat = 0;
+ 	state->printer_page_offset = 0;
+ 
+ 	capt_get_printer_info(state);
+@@ -384,6 +406,9 @@
+ 	 * Default 0x1f (density=7 in bits 5-2). If ink_k is set, shift it.
+ 	 * Fix: was ink_k, 0x1C, 0x1C, 0x1C (non-uniform); now all 4 bytes equal. */
+ 	uint8_t td = (dims->ink_k > 0) ? (uint8_t)(dims->ink_k << 2) : 0x1f;
++	bool linux_job = uses_linux_job_protocol(state);
++	uint8_t linux_mode = linux_job ? 0x01 : 0x00;
++	uint8_t other_td = linux_job ? td : 0x1c;
+ 
+ 	/* PaperType: special_mode_for_papertype() result per protocol §2.14.
+ 	 * Fix: was raw dims->media_type (wrong enum values); now converted correctly.
+@@ -485,11 +510,11 @@
+ 	 */
+ 	uint8_t pageparms[] = {
+ 		/* idx  0- 7 */
+-		0x00, 0x00, 0x30, 0x2A, sz, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x30, 0x2A, sz, linux_mode, 0x00, 0x00,
+ 		/* idx  8-15: TonerDensity, PaperType, ResFlag=0x11, Fixed_04, Fixed_00 */
+-		td, 0x1C, 0x1C, 0x1C, paper_type, dims->media_adapt, 0x04, 0x00,
++	td, other_td, other_td, other_td, paper_type, dims->media_adapt, 0x04, 0x00,
+ 		/* idx 16-23: Fixed_01, Fixed_01b, SuperSmooth=0x02, TonerSave, Unk21=0x00, 0x00, MarginW LE */
+-		0x01, 0x01, 0x02, save, 0x00, 0x00,
++	0x01, 0x01, 0x02, save, linux_mode, 0x00,
+ 		LO(dims->margin_width), HI(dims->margin_width),
+ 		/* idx 24-31: MarginH LE, LineSize LE, ImgHeight LE */
+ 		LO(dims->margin_height), HI(dims->margin_height),
+@@ -515,10 +540,11 @@
  		lbp2900_wait_ready(state->ops);
  	}
  
@@ -127,7 +510,7 @@
  	}
  
  	capt_multi_begin(CAPT_MULTI_COMMAND);
-@@ -546,6 +547,7 @@
+@@ -546,6 +572,7 @@
  	const struct capt_status_s *status;
  
  	fprintf(stderr, "DEBUG: CAPT: out-of-paper recovery starting\n");
@@ -135,7 +518,7 @@
  
  	/* 1. GetInputStatus — triggered by Bas1 & NEED_INPUT_STATUS; byte3=0x80 confirms paper-out */
  	capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
-@@ -638,6 +640,7 @@
+@@ -638,10 +665,22 @@
  	capt_get_xstatus_only();
  
  	fprintf(stderr, "DEBUG: CAPT: out-of-paper recovery complete, counters reset to 0\n");
@@ -143,7 +526,22 @@
  	/* After recovery, page counters are reset to 0.
  	 * Caller must track pages_printed_before_error to know where to resume. */
  }
-@@ -679,9 +682,10 @@
+ 
++static void send_job_heartbeat(struct printer_state_s *state)
++{
++	struct timespec now;
++	clock_gettime(CLOCK_MONOTONIC, &now);
++	double seconds = now.tv_sec + now.tv_nsec / 1e9;
++	if (seconds >= state->next_job_heartbeat) {
++		send_job_start(CAPT_JOBFLAG_CONT);
++		state->next_job_heartbeat = seconds + 0.5;
++	}
++}
++
+ static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct page_dims_s *dims)
+ {
+ 	(void) dims;
+@@ -679,9 +718,10 @@
  		 * upload, skip the poll loop entirely (spec §3.3, §14 Rule 10). */
  		status = lbp2900_get_status(state->ops);
  		if (status->page_decoding != pipage) {
@@ -155,15 +553,28 @@
  				status = lbp2900_get_status(state->ops);
  			} while (status->page_decoding != pipage);
  		}
-@@ -694,6 +698,7 @@
- 	/* SetJobInfo2(flag=6) at job end is now sent once in lbp2900_job_epilogue,
- 	 * not per-page here, per protocol §2.7 §3.1.1. */
+@@ -691,15 +731,14 @@
+ 		capt_sendrecv(CAPT_START_PRINT, buf, 2, NULL, 0);
+ 	}
  
+-	/* SetJobInfo2(flag=6) at job end is now sent once in lbp2900_job_epilogue,
+-	 * not per-page here, per protocol §2.7 §3.1.1. */
+-
++	bool linux_job = uses_linux_job_protocol(state);
 +	unsigned page_attempts = 0;
  	while (1) {
  		status = lbp2900_get_status(state->ops);
  
-@@ -761,6 +766,8 @@
+-		/* SetJobInfo2(flag=2): send ONCE at first inter-page idle when Printed >= 1.
+-		 * Spec §5, §11, §14 Rule 13: fire after StartPrint, during between-pages wait. */
+-		if (!state->sent_job_cont && status->page_completed >= 1) {
++		if (linux_job) {
++			send_job_heartbeat(state);
++		} else if (!state->sent_job_cont && status->page_completed >= 1) {
+ 			send_job_start(CAPT_JOBFLAG_CONT);
+ 			state->sent_job_cont = true;
+ 		}
+@@ -761,6 +800,8 @@
  				? "paper jam" : "door open";
  			fprintf(stderr, "ERROR: CAPT: fatal printer error: %s (Eng=0x%04x) — aborting\n",
  				reason, status->xstat_eng);
@@ -172,7 +583,7 @@
  			uint8_t jbuf[2] = { LO(job), HI(job) };
  			capt_sendrecv(CAPT_RELEASE_UNIT, jbuf, 2, NULL, 0);
  			exit(1);
-@@ -769,11 +776,13 @@
+@@ -769,52 +810,44 @@
  		/* Legacy no-paper flags from extended status */
  		if (FLAG(status, CAPT_FL_NOPAPER2) || FLAG(status, CAPT_FL_NOTREADY)) {
  			fprintf(stderr, "DEBUG: CAPT: no paper\n");
@@ -180,32 +591,77 @@
  			if (FLAG(status, CAPT_FL_PRINTING) || FLAG(status, CAPT_FL_PROCESSING1))
 -				continue;
 -			return false;
--		}
--		usleep(100000);
 +				capt_poll_wait(&page_attempts, "page acceptance");
 +			else
 +				return false;
-+		}
+ 		}
+-		usleep(100000);
 +		capt_poll_wait(&page_attempts, "page acceptance");
  	}
  }
  
-@@ -797,12 +806,13 @@
- 	 * interleaved as the Windows driver does) until the bit is gone. */
- 	{
- 		const struct capt_status_s *s;
-+		unsigned delivery_attempts = 0;
- 		while (1) {
- 			capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
- 			s = capt_get_xstatus_only();
- 			if (!(s->aux & CAPT_AUX_PAPER_DELIVERY))
- 				break;
+ static void lbp2900_job_epilogue(struct printer_state_s *state)
+ {
+ 	uint8_t jbuf[2] = { LO(job), HI(job) };
++	bool linux_job = uses_linux_job_protocol(state);
+ 
+-	/* SetJobInfo2(flag=3): send immediately after last page's IC_BLACK_END.
+-	 * Spec §9, §11, §14 Rule 14: do NOT wait for Printed==totalPages first.
+-	 * GetExtendedStatus first to confirm final state, then send flag=3. */
++	/* End and release the CAPT job while the USB session stays open. */
+ 	capt_get_xstatus_only();
+-	send_job_start(CAPT_JOBFLAG_END);
++	if (linux_job)
++		send_job_heartbeat(state);
++	send_job_start(linux_job ? CAPT_JOBFLAG_END_LIN : CAPT_JOBFLAG_END);
+ 
+-	capt_sendrecv(CAPT_RELEASE_UNIT, jbuf, 2, NULL, 0);
+-
+-	/* Wait for RCF_PAPER_DELIVERY (Aux byte 9 bit 0x04) to clear before
+-	 * issuing the teardown sequence.  The last sheet is still being
+-	 * physically delivered while this bit is set; sending ClearError /
+-	 * DiscardData / GoOffline / ReleaseUnit before it clears aborts the
+-	 * delivery prematurely.  Poll GetExtendedStatus (with GetInputStatus
+-	 * interleaved as the Windows driver does) until the bit is gone. */
+-	{
+-		const struct capt_status_s *s;
+-		while (1) {
+-			capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
+-			s = capt_get_xstatus_only();
+-			if (!(s->aux & CAPT_AUX_PAPER_DELIVERY))
+-				break;
 -			usleep(100000);
-+			capt_poll_wait(&delivery_attempts, "final paper delivery");
- 		}
+-		}
++	uint8_t release[2];
++	size_t size = sizeof(release);
++	capt_sendrecv(CAPT_RELEASE_UNIT, jbuf, sizeof(jbuf), release, &size);
++	if (linux_job && (size < sizeof(release) || release[0])) {
++		fprintf(stderr, "ERROR: CAPT: ReleaseUnit failed (status 0x%02x, %zu reply bytes)\n",
++			size ? release[0] : 0, size);
++		exit(1);
  	}
- 	return;
-@@ -914,8 +924,9 @@
+-	return;
+ 
+-	/* Linux epilogue: ClearError → DiscardData → GetExtendedStatus
+-	 * → GoOffline(JobID) → ReleaseUnit (protocol §3.1.1 Linux order) */
+-	capt_get_xstatus_only();
+-	capt_sendrecv(CAPT_CLEAR_ERROR, NULL, 0, NULL, 0);
+-	capt_sendrecv(CAPT_DISCARD_DATA, NULL, 0, NULL, 0);
+-	capt_get_xstatus_only();
+-	capt_sendrecv(CAPT_GO_OFFLINE, jbuf, 2, NULL, 0);
+-	capt_sendrecv(CAPT_RELEASE_UNIT, jbuf, 2, NULL, 0);
++	unsigned delivery_attempts = 0;
++	while (1) {
++		capt_sendrecv(CAPT_GET_INPUT_STATUS, NULL, 0, NULL, 0);
++		const struct capt_status_s *s = capt_get_xstatus_only();
++		if (!(s->aux & CAPT_AUX_PAPER_DELIVERY))
++			break;
++		capt_poll_wait(&delivery_attempts, "final paper delivery");
++	}
+ }
+ 
+ static void lbp2900_page_setup(struct printer_state_s *state,
+@@ -914,8 +947,10 @@
  		.gpio_blink = lbp2900_gpio_blink,
  		.gpio_blink_size = ARRAY_SIZE(lbp2900_gpio_blink)
  	},
@@ -214,6 +670,7 @@
 +	/* Always refresh extended page counters on the LBP2900. */
 +	.get_status = capt_get_xstatus_only,
 +	.wait_ready = capt_wait_xready_only,
++	.linux_job_protocol = true,
  };
  register_printer("LBP2900", lbp2900_ops.ops, WORKS);
  
@@ -254,7 +711,7 @@
  
 -static void do_print(int fd)
 +static bool valid_raster_header(const struct cups_page_header2_s *header)
-+{
+ {
 +	return header->cupsWidth > 0 && header->cupsWidth <= 10000 &&
 +		header->cupsHeight > 0 && header->cupsHeight <= 10000 &&
 +		header->HWResolution[0] == 600 && header->HWResolution[1] == 600 &&
@@ -267,17 +724,17 @@
 +}
 +
 +static bool do_print(int fd)
- {
++{
  	bool in_job = false;
 -	ops = printer_detect();
--
+ 
 -	if (ops->alloc_state)
 -		state = ops->alloc_state();
 -	else
 -		state = calloc(1, sizeof(struct printer_state_s));
 -	state->ops = ops;
 -	state->ipage = 0;
- 
+-
  	raster = cupsRasterOpen(fd, CUPS_RASTER_READ);
 +	if (!raster) {
 +		fprintf(stderr, "ERROR: CAPT: unable to open CUPS raster\n");
@@ -286,11 +743,10 @@
  
  	fprintf(stderr, "DEBUG: CAPT: rastertocapt is rendering\n");
  
-@@ -296,6 +319,23 @@
- 
+@@ -297,6 +320,23 @@
  			if (! cupsRasterReadHeader2(raster, &header))
  				break; /* no more pages */
-+
+ 
 +			if (!valid_raster_header(&header)) {
 +				fprintf(stderr, "ERROR: CAPT: expected 600 dpi monochrome CUPS raster\n");
 +				exit(1);
@@ -307,9 +763,10 @@
 +				state->ipage = 0;
 +				fprintf(stderr, "STATE: -media-empty\nSTATE: -media-jam\nSTATE: -door-open\n");
 +			}
- 
++
  			cached_page = calloc(1, sizeof(struct cached_page_s));
  			if (! cached_page)
+ 				abort();
 @@ -352,6 +392,7 @@
  		}
  
@@ -346,6 +803,5 @@
  		close(fd);
  
 -	return 0;
--}
 +	return success ? 0 : 1;
-+}
+ }

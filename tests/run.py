@@ -4,8 +4,10 @@ import os
 import hashlib
 import json
 import pathlib
+import socket
 import subprocess
 import sys
+import tempfile
 
 root = pathlib.Path(__file__).resolve().parent.parent
 out = root / "build/tests"
@@ -81,6 +83,73 @@ raster = out / "two-pages.ras"
 raster.write_bytes(result.stdout)
 (out / "rasterization.log").write_bytes(result.stderr)
 log(run([out / "filter-unit", raster]).stdout.decode().strip())
+
+run(cc + [root / "tests/usb-session-unit.c", "-lcups", "-o", out / "usb-session-unit"])
+
+
+def start_cups_process(args, backchannel, sidechannel, **kwargs):
+    # Map the test pipes to the same descriptors as a real CUPS filter/backend.
+    setup = """
+import os, sys
+sources = [int(value) for value in sys.argv[1:3]]
+copies = [os.dup(fd) for fd in sources]
+for source, dest in zip(copies, (3, 4)):
+    os.dup2(source, dest)
+    os.set_inheritable(dest, True)
+for fd in set(sources + copies) - {3, 4}:
+    os.close(fd)
+os.execv(sys.argv[3], sys.argv[3:])
+"""
+    return subprocess.Popen([sys.executable, "-c", setup, str(backchannel), str(sidechannel),
+                             *map(str, args)], pass_fds=(backchannel, sidechannel), env=env, **kwargs)
+
+
+with tempfile.TemporaryDirectory(prefix="capt-test-", dir="/tmp") as temp, socket.socket(socket.AF_UNIX) as listener:
+    path = str(pathlib.Path(temp) / "usb.sock")
+    listener.bind(path)
+    listener.listen()
+    daemon = subprocess.Popen([out / "usb-session-unit", "serve", str(listener.fileno())],
+                              pass_fds=(listener.fileno(),), env=env)
+    try:
+        for index in range(1, 9):
+            read_fd, write_fd = os.pipe()
+            filter_side, backend_side = socket.socketpair()
+            with filter_side, backend_side, tempfile.TemporaryFile() as backend_log:
+                filter_process = start_cups_process(
+                    [binary, index, "tester", "Sequential USB job", 1, "", raster],
+                    read_fd, filter_side.fileno(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                backend_process = start_cups_process(
+                    [out / "usb-session-unit", "submit", path], write_fd, backend_side.fileno(),
+                    stdin=filter_process.stdout, stderr=backend_log,
+                )
+                os.close(read_fd)
+                os.close(write_fd)
+                filter_process.stdout.close()
+                filter_side.close()
+                backend_side.close()
+                try:
+                    _, filter_log = filter_process.communicate(timeout=15)
+                    backend_code = backend_process.wait(timeout=5)
+                    backend_log.seek(0)
+                    backend_output = backend_log.read()
+                    assert filter_process.returncode == backend_code == 0, (filter_log, backend_output)
+                    assert b"PAGE: 1 1\n" in filter_log and b"PAGE: 2 1\n" in filter_log
+                    assert f"Mock USB job {index}\n".encode() in backend_output
+                    if index == 2:
+                        assert b"discarded 3 stale USB reply bytes" in filter_log
+                except subprocess.TimeoutExpired as error:
+                    backend_log.seek(0)
+                    raise RuntimeError((error.stderr, backend_log.read())) from error
+                finally:
+                    for process in (filter_process, backend_process):
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait()
+    finally:
+        daemon.terminate()
+        daemon.wait(timeout=5)
+log("USB session relay: eight consecutive two-page jobs passed with fragmented, BCD and stale replies")
 
 log("Physical printing: NOT TESTED. No package was installed and no printer job was sent.")
 (out / "RESULTS.txt").write_text("\n".join(logs) + "\n")

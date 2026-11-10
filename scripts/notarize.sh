@@ -7,7 +7,7 @@ APP_ID="${DEVELOPER_ID_APPLICATION:-Developer ID Application: Anh Tuan Vu Nguyen
 export DEVELOPER_ID_INSTALLER="${DEVELOPER_ID_INSTALLER:-Developer ID Installer: Anh Tuan Vu Nguyen (CF5PGH3KGK)}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-MNotch-notary}"
 export OPENCAPT_ARTIFACTS_DIR="$PROJECT_DIR/build/notarize/arm64"
-export OPENCAPT_DIST_DIR="$PROJECT_DIR/dist/notarized"
+export OPENCAPT_DIST_DIR="${OPENCAPT_DIST_DIR:-$PROJECT_DIR/dist/notarized}"
 PKG="$OPENCAPT_DIST_DIR/Canon-LBP2900-OpenCAPT-macOS26-27-arm64-$VERSION.pkg"
 
 IDENTITIES="$(/usr/bin/security find-identity -v)"

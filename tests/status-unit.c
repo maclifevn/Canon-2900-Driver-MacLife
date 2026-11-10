@@ -13,7 +13,7 @@ void capt_sendrecv(uint16_t cmd, const void *data, size_t length, void *reply, s
     if (reply && reply_size) {
         memset(reply, 0, *reply_size);
         ((unsigned char *)reply)[0] = stuck || ++calls < 3 ? CAPT_FL_CMD_BUSY_BIT : 0;
-        *reply_size = 44;
+        *reply_size = 40;
     }
 }
 

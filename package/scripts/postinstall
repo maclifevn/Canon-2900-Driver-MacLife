@@ -7,15 +7,22 @@ echo "$(/bin/date -u) OpenCAPT postinstall"
 QUEUE=Canon_LBP2900_OpenCAPT
 BACKEND=/usr/libexec/cups/backend/canon2900usb
 PPD=/Library/Printers/PPDs/Contents/Resources/Canon-LBP2900-OpenCAPT.ppd
+SERVICE=org.opencapt.lbp2900.usb
+SERVICE_PLIST="/Library/LaunchDaemons/$SERVICE.plist"
 DEVICE_URI=canon2900usb://Canon/LBP2900
 OLD_URI="$(/usr/bin/lpstat -v "$QUEUE" 2>/dev/null | /usr/bin/awk -F': ' 'NR == 1 {print $2}')"
 case "$OLD_URI" in
     canon2900usb://Canon/LBP2900|canon2900usb://Canon/LBP2900\?*) DEVICE_URI="$OLD_URI" ;;
 esac
 
-/usr/sbin/chown root:wheel /usr/libexec/cups/filter/canon2900-rastertocapt "$BACKEND" "$PPD"
+/usr/sbin/chown root:wheel /usr/libexec/cups/filter/canon2900-rastertocapt "$BACKEND" "$PPD" "$SERVICE_PLIST"
 /bin/chmod 0555 /usr/libexec/cups/filter/canon2900-rastertocapt "$BACKEND"
-/bin/chmod 0644 "$PPD"
+/bin/chmod 0644 "$PPD" "$SERVICE_PLIST"
+
+if /bin/launchctl print "system/$SERVICE" >/dev/null 2>&1; then
+    /bin/launchctl bootout "system/$SERVICE"
+fi
+/bin/launchctl bootstrap system "$SERVICE_PLIST"
 
 # Discovery preserves the attached printer's serial/location. Only the exact
 # LBP2900 model is reported by this package's dedicated USB backend.

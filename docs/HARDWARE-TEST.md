@@ -16,11 +16,11 @@ Với mỗi phiên bản macOS 26 và 27, ghi model Mac/chip, version/build OS, 
 1. Cài khi máy in đã cắm; xác nhận queue tồn tại sau Installer và sau khởi động lại.
 2. Cài khi máy in chưa cắm; cắm lại và thử in.
 3. In PDF A4 1, 2 và 10 trang; kiểm tra số trang, nội dung, lề và trang cuối thực sự ra giấy.
-4. In trang có chữ/ảnh dày, hai bản sao và nhiều job liên tiếp; kiểm tra không lệch/trùng/mất trang.
+4. Bật máy in rồi gửi 10 lệnh in một trang riêng biệt, đợi mỗi lệnh xong trước khi gửi lệnh kế tiếp. Kiểm tra từng tờ và xác nhận log có `reused persistent USB session` ở các lệnh sau. Sau đó thử in trang có chữ/ảnh dày và hai bản sao.
 5. Hủy job đang in; rút/cắm USB; tắt/bật máy in và gửi job tiếp theo.
 6. Hết giấy giữa job: kiểm tra thông báo, nạp giấy, nhấn nút máy in và Resume nếu queue dừng. Ghi rõ có cần gửi lại job và có trùng trang không.
 7. Mở nắp/kẹt giấy: kiểm tra báo lỗi, phục hồi sau xử lý.
-8. Cài cùng bộ Canon cũ; xác nhận queue cũ và máy in mặc định không bị đổi. Không gửi job từ cả hai queue vào cùng một máy in đồng thời.
+8. Cài cùng bộ Canon cũ và kiểm tra queue cũ cùng máy in mặc định. In từ queue của bản này khi dịch vụ đang giữ cổng USB của máy in.
 9. Cài đè bản này rồi gỡ; xác nhận chỉ file/queue OpenCAPT được xử lý.
 
 Chỉ đánh dấu đạt sau khi người thử nhìn thấy và kiểm tra bản in. CUPS báo `completed` chưa đủ.
